@@ -1,6 +1,25 @@
 # cloud-agent
 
-A **LangGraph ReAct agent** backed by **Amazon Bedrock Converse** via **boto3** (`langchain-aws` `ChatBedrockConverse`). Built to replicate a client-like LangChain + boto3 setup and test Akto proxy URL swaps.
+A **LangGraph ReAct agent** backed by **Amazon Bedrock Converse** via **boto3** (`langchain-aws` `ChatBedrockConverse`). Reference implementation for routing Bedrock agent traffic through the **Akto proxy** with minimal client changes.
+
+## Client integration
+
+**→ [docs/CLIENT-INTEGRATION.md](docs/CLIENT-INTEGRATION.md)** — step-by-step guide for client teams:
+
+- Copy `bedrock_config.py`, swap `create_bedrock_llm()` in one place
+- Set `BEDROCK_ENDPOINT_URL` to enable the proxy (unset to roll back)
+- Verify with `debug_bedrock.py`
+
+Quick start:
+
+```env
+BEDROCK_ENDPOINT_URL=https://akto-proxy?openai_url=https://bedrock-runtime.<region>.amazonaws.com
+```
+
+```python
+from bedrock_config import create_bedrock_llm
+llm = create_bedrock_llm()
+```
 
 ## Stack
 
@@ -11,17 +30,10 @@ A **LangGraph ReAct agent** backed by **Amazon Bedrock Converse** via **boto3** 
 
 ## Proxy (sign-then-relay)
 
-```env
-BEDROCK_ENDPOINT_URL=https://akto-proxy?openai_url=https://bedrock-runtime.<region>.amazonaws.com
-```
+See **[docs/CLIENT-INTEGRATION.md](docs/CLIENT-INTEGRATION.md)** for the full client guide. Summary:
 
-Same as boto3 `endpoint_url`. The SDK:
-
-1. Connects to the Akto proxy URL
-2. **Signs** as if the request goes to `bedrock-runtime.<region>.amazonaws.com` (Host + canonical path/query)
-3. Re-adds `openai_url` on the wire so Akto can route (unsigned; stripped before Bedrock)
-
-Akto must **forward without mutating** signed fields (`Authorization`, `X-Amz-*`, path encoding). On forward, set `Host` to the upstream Bedrock host (`bedrock-runtime.<region>.amazonaws.com`); inbound wire may use the proxy `Host` for gateway routing.
+1. Set `BEDROCK_ENDPOINT_URL` (boto3 `endpoint_url`)
+2. Use `create_bedrock_llm()` so SigV4 is computed for upstream Bedrock, then routed through Akto
 
 ```bash
 ./scripts/start-server.sh proxy
