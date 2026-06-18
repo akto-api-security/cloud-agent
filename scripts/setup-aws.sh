@@ -6,7 +6,7 @@
 #   ./scripts/setup-aws.sh configure    # aws configure only
 #   ./scripts/setup-aws.sh role         # add assume-role profile
 #   ./scripts/setup-aws.sh verify       # check identity + bedrock
-#   ./scripts/setup-aws.sh test         # run debug_bedrock.py
+#   ./scripts/setup-aws.sh test         # Bedrock Converse smoke test (boto3 + hooks)
 #
 # Prerequisites: aws CLI v2, python3 venv in project root
 
@@ -128,27 +128,55 @@ EOF
 
 step_test_agent() {
   require_venv
-  log "Test agent (boto3 wire headers + Converse call)"
+  log "Test agent (boto3 Converse via bedrock_config hooks)"
   cd "$ROOT"
   # shellcheck disable=SC1091
   source .venv/bin/activate
   export AWS_PROFILE="$PROFILE"
   export AWS_REGION="$REGION"
-  unset AWS_BEARER_TOKEN_BEDROCK || true
-  "$ROOT/.venv/bin/python" debug_bedrock.py
+  unset AWS_BEARER_TOKEN_BEDROCK BEDROCK_ENDPOINT_URL || true
+  "$ROOT/.venv/bin/python" - <<'PY'
+from bedrock_config import create_bedrock_runtime_client, default_model_id
+import os
+
+client = create_bedrock_runtime_client()
+model_id = os.getenv("BEDROCK_MODEL_ID", "").strip() or default_model_id()
+response = client.converse(
+    modelId=model_id,
+    messages=[{"role": "user", "content": [{"text": "Reply with exactly: ok"}]}],
+    inferenceConfig={"maxTokens": 16, "temperature": 0},
+)
+text = response["output"]["message"]["content"][0]["text"]
+print(f"SUCCESS — model reply: {text!r}")
+PY
 }
 
 step_test_proxy() {
   require_venv
-  log "Test via Akto proxy"
+  log "Test via Akto proxy (requires BEDROCK_ENDPOINT_URL in .env or env)"
   cd "$ROOT"
   # shellcheck disable=SC1091
   source .venv/bin/activate
+  if [[ -f .env ]]; then set -a; source .env; set +a; fi
   export AWS_PROFILE="$PROFILE"
   export AWS_REGION="$REGION"
   unset AWS_BEARER_TOKEN_BEDROCK || true
-  unset BEDROCK_ENDPOINT_URL || true
-  "$ROOT/.venv/bin/python" debug_bedrock.py
+  [[ -n "${BEDROCK_ENDPOINT_URL:-}" ]] || die "Set BEDROCK_ENDPOINT_URL for proxy test"
+  "$ROOT/.venv/bin/python" - <<'PY'
+from bedrock_config import create_bedrock_runtime_client, default_model_id, resolve_endpoint_url
+import os
+
+print("endpoint_url:", resolve_endpoint_url())
+client = create_bedrock_runtime_client()
+model_id = os.getenv("BEDROCK_MODEL_ID", "").strip() or default_model_id()
+response = client.converse(
+    modelId=model_id,
+    messages=[{"role": "user", "content": [{"text": "Reply with exactly: ok"}]}],
+    inferenceConfig={"maxTokens": 16, "temperature": 0},
+)
+text = response["output"]["message"]["content"][0]["text"]
+print(f"SUCCESS — model reply: {text!r}")
+PY
 }
 
 print_iam_policy() {
