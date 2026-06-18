@@ -1,78 +1,63 @@
-# Akto proxy integration for Bedrock agents
+# Akto proxy — client configuration
 
-Guide for client teams running **LangChain / LangGraph agents** on **Amazon Bedrock** (boto3 + SigV4). The goal is a **minimal, reversible** change: route LLM traffic through Akto without rewriting your agent.
-
-## What you change vs what stays the same
-
-| Change | Keep as-is |
-|--------|------------|
-| Bedrock client wiring (`endpoint_url` + signing hooks) | Agent logic, tools, prompts, memory |
-| One env var when proxy is enabled | IAM credentials (`AWS_PROFILE`, instance role, etc.) |
-| Optional: copy `bedrock_config.py` | Model ID, region, business APIs |
-
-**Rollback:** unset `BEDROCK_ENDPOINT_URL` — your app talks to Bedrock directly again.
+Guide for teams running **LangChain / LangGraph** or **boto3** agents on **Amazon Bedrock** (SigV4). You do not deploy or operate the Akto proxy — Akto provides a URL; you point your Bedrock client at it.
 
 ---
 
-## What Akto provides (before you start)
+## The URL
 
-Your Akto team will give you:
+Akto gives you two values:
 
-1. **Proxy base URL** — e.g. `https://akto-proxy` (your tenant-specific host)
-2. **Upstream Bedrock URL** — e.g. `https://bedrock-runtime.us-east-1.amazonaws.com`
 
-Combined endpoint (this is what your app uses):
+| From Akto                    | Example                                          |
+| ---------------------------- | ------------------------------------------------ |
+| **Proxy host**               | `https://akto-proxy`                             |
+| **Your Bedrock runtime URL** | `https://bedrock-runtime.<region>.amazonaws.com` |
 
-```text
-https://akto-proxy?openai_url=https://bedrock-runtime.<region>.amazonaws.com
+
+Set this on your agent (one env var):
+
+```env
+BEDROCK_ENDPOINT_URL=https://akto-proxy?openai_url=https://bedrock-runtime.<region>.amazonaws.com
 ```
 
-Replace `<region>` with your Bedrock region (`us-east-1`, `ap-south-1`, etc.).
+Example:
 
----
-
-## How it works (sign-then-relay)
-
-Boto3 signs requests with **Host**, **path**, and **query string** baked into the signature. Akto sits in front of Bedrock, so the client must:
-
-1. **Sign** as if the request goes to `bedrock-runtime.<region>.amazonaws.com`
-2. **Send** the signed bytes to the Akto proxy (proxy `Host` on the wire)
-3. **Re-attach** `openai_url` on the wire so Akto knows where to forward (this param is **not** part of the signature)
-
-```mermaid
-sequenceDiagram
-    participant App as Your agent
-    participant SDK as boto3 / langchain-aws
-    participant Akto as Akto proxy
-    participant BR as bedrock-runtime
-
-    App->>SDK: invoke(messages)
-    Note over SDK: before-sign: Host=bedrock-runtime, strip openai_url from canonical query
-    SDK->>SDK: SigV4 sign
-    Note over SDK: before-send: Host=akto-proxy, re-add openai_url
-    SDK->>Akto: POST /model/.../converse (signed)
-    Akto->>Akto: guardrails (PII, injection, etc.)
-    Akto->>BR: forward unchanged signed request
-    BR-->>Akto: Converse response
-    Akto-->>SDK: response
-    SDK-->>App: AIMessage
+```env
+BEDROCK_ENDPOINT_URL=https://akto-proxy?openai_url=https://bedrock-runtime.ap-south-1.amazonaws.com
 ```
 
-**You do not reimplement signing.** Copy the small hook module below (or equivalent in your language).
+- `akto-proxy` — placeholder for the hostname Akto provides (no path)
+- `<region>` — your Bedrock region; must match `AWS_REGION`
+- `openai_url` — tells Akto which Bedrock runtime to forward to (required in the URL Akto gives you)
+
+**Rollback:** unset `BEDROCK_ENDPOINT_URL` — your app calls Bedrock directly again.
 
 ---
 
-## Integration path A — LangChain / LangGraph (recommended)
+## Configuration summary
 
-This matches agents using `langchain-aws` (`ChatBedrockConverse` or `ChatBedrock`).
 
-### Step 1 — Copy one file
+| Setting                     | Direct Bedrock | Via Akto                       |
+| --------------------------- | -------------- | ------------------------------ |
+| `BEDROCK_ENDPOINT_URL`      | unset          | Akto URL above                 |
+| `AWS_REGION`                | your region    | same region as in `openai_url` |
+| `AWS_PROFILE` / IAM role    | unchanged      | unchanged                      |
+| `BEDROCK_MODEL_ID`          | unchanged      | unchanged                      |
+| Agent logic, tools, prompts | unchanged      | unchanged                      |
 
-Copy [`bedrock_config.py`](../bedrock_config.py) into your project (same directory as your agent entrypoint, or a shared `lib/` package).
 
-No extra dependencies — it uses what you already have: `boto3`, `botocore`, `langchain-aws`, optional `python-dotenv`.
+**Code change:** use `create_bedrock_llm()` instead of constructing `ChatBedrockConverse` directly (see below). Copy `[bedrock_config.py](../bedrock_config.py)` — it handles signing for the proxy.
 
-### Step 2 — Swap LLM construction (one line)
+---
+
+## LangChain / LangGraph (recommended)
+
+### 1. Copy `bedrock_config.py`
+
+Copy `[bedrock_config.py](../bedrock_config.py)` into your project. No new dependencies.
+
+### 2. Replace LLM construction
 
 **Before:**
 
@@ -81,7 +66,7 @@ from langchain_aws import ChatBedrockConverse
 
 llm = ChatBedrockConverse(
     model_id="amazon.nova-micro-v1:0",
-    region_name="us-east-1",
+    region_name="ap-south-1",
     credentials_profile_name="my-profile",
 )
 ```
@@ -91,49 +76,66 @@ llm = ChatBedrockConverse(
 ```python
 from bedrock_config import create_bedrock_llm
 
-llm = create_bedrock_llm()  # reads model/region/profile from env
-# or: llm = create_bedrock_llm("amazon.nova-micro-v1:0")
+llm = create_bedrock_llm()
 ```
 
-Use `create_bedrock_llm()` anywhere you build the Bedrock LLM — including inside `create_react_agent(...)`.
+Use `create_bedrock_llm()` everywhere you build the Bedrock LLM (including `create_react_agent(...)`).
 
-### Step 3 — Set environment variables
-
-**Direct Bedrock (today, no proxy):**
+### 3. Environment
 
 ```env
 AWS_PROFILE=my-bedrock-profile
-AWS_REGION=us-east-1
-BEDROCK_MODEL_ID=amazon.nova-micro-v1:0
-# BEDROCK_ENDPOINT_URL unset
+AWS_REGION=ap-south-1
+BEDROCK_MODEL_ID=apac.amazon.nova-micro-v1:0
+
+# Enable Akto — paste the URL Akto gave you:
+BEDROCK_ENDPOINT_URL=https://akto-proxy?openai_url=https://bedrock-runtime.ap-south-1.amazonaws.com
 ```
 
-**Via Akto proxy (add one line):**
-
-```env
-BEDROCK_ENDPOINT_URL=https://akto-proxy?openai_url=https://bedrock-runtime.us-east-1.amazonaws.com
-```
-
-That is the only difference when enabling the proxy.
-
-### Step 4 — Verify
-
-```bash
-# Direct
-python debug_bedrock.py
-
-# Proxy
-export BEDROCK_ENDPOINT_URL="https://akto-proxy?openai_url=https://bedrock-runtime.us-east-1.amazonaws.com"
-python debug_bedrock.py
-```
-
-Expected: `SUCCESS — model reply: 'ok'` in both modes. In proxy mode, wire logs should show the Akto host in the URL and `Authorization: AWS4-HMAC-SHA256 ...`.
+That is the only difference vs direct Bedrock for most teams.
 
 ---
 
-## Integration path B — Raw boto3 (no LangChain)
+## Why a small hook module is required
 
-If you call `bedrock-runtime` directly:
+Boto3 SigV4 signs **Host**, **path**, and **query**. With Akto in the middle you must:
+
+1. Sign as if the request goes to `bedrock-runtime.<region>.amazonaws.com`
+2. Send the signed request to the **Akto proxy host**
+3. Keep `openai_url` on the wire for routing, but **exclude it from the signature**
+
+`bedrock_config.py` does this via boto3 `before-sign` / `before-send` hooks. You do not implement signing yourself.
+
+---
+
+## Streaming (ConverseStream)
+
+If your agent uses Bedrock streaming, add:
+
+```env
+BEDROCK_STREAM=true
+```
+
+`create_bedrock_llm()` then uses `converse_stream` (including when tools are bound). Same `BEDROCK_ENDPOINT_URL` — no separate streaming URL.
+
+For **raw boto3** streaming (no LangChain), also copy `[bedrock_converse_stream.py](../bedrock_converse_stream.py)` and use `create_bedrock_runtime_client()`:
+
+```python
+from bedrock_config import create_bedrock_runtime_client, default_model_id
+from bedrock_converse_stream import collect_converse_stream_text
+
+client = create_bedrock_runtime_client()
+reply = collect_converse_stream_text(
+    client,
+    model_id=default_model_id(),
+    messages=[{"role": "user", "content": [{"text": "Hello"}]}],
+    inference_config={"maxTokens": 256, "temperature": 0},
+)
+```
+
+---
+
+## Raw boto3 (no LangChain)
 
 ```python
 import os
@@ -146,12 +148,10 @@ from bedrock_config import (
     resolve_proxy_signing_config,
 )
 
-endpoint_url = resolve_endpoint_url()  # from BEDROCK_ENDPOINT_URL
-
 client = boto3.client(
     "bedrock-runtime",
     region_name=os.environ["AWS_REGION"],
-    endpoint_url=endpoint_url,
+    endpoint_url=resolve_endpoint_url(),  # BEDROCK_ENDPOINT_URL
     config=Config(connect_timeout=90, read_timeout=90, retries={"max_attempts": 0}),
 )
 
@@ -165,48 +165,44 @@ response = client.converse(
 )
 ```
 
-Same env vars as path A.
+Or use `create_bedrock_runtime_client()` from `bedrock_config.py` (same hooks, less boilerplate).
 
 ---
 
 ## Environment variables
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `BEDROCK_ENDPOINT_URL` | For proxy only | Full Akto URL including `openai_url` query param |
-| `AWS_REGION` | Yes | Bedrock region (must match `openai_url` host) |
-| `AWS_PROFILE` | If using profiles | IAM profile with `bedrock:InvokeModel` / `bedrock:Converse` |
-| `BEDROCK_MODEL_ID` | Recommended | Model or inference profile ID |
-| `BEDROCK_SIGNING_HOST` | Rarely | Override signing host if proxy URL has no `openai_url` |
-| `BEDROCK_MAX_TOKENS` | Optional | Default `256` |
-| `LLM_TIMEOUT_SECONDS` | Optional | Default `90` |
-| `BEDROCK_API` | Optional | `converse` (default) or `invoke` |
 
-### Do not mix SigV4 and Bearer
+| Variable               | Required          | Description                                                                                |
+| ---------------------- | ----------------- | ------------------------------------------------------------------------------------------ |
+| `BEDROCK_ENDPOINT_URL` | For Akto          | Full URL from Akto, including `?openai_url=https://bedrock-runtime.<region>.amazonaws.com` |
+| `AWS_REGION`           | Yes               | Must match the region in `openai_url`                                                      |
+| `AWS_PROFILE`          | If using profiles | IAM with `bedrock:Converse` / `bedrock:InvokeModel`                                        |
+| `BEDROCK_MODEL_ID`     | Recommended       | Model or inference profile ID                                                              |
+| `BEDROCK_STREAM`       | Optional          | `true` for ConverseStream                                                                  |
+| `BEDROCK_SIGNING_HOST` | Rarely            | Only if Akto URL has no `openai_url` param                                                 |
+| `BEDROCK_MAX_TOKENS`   | Optional          | Default `256`                                                                              |
+| `LLM_TIMEOUT_SECONDS`  | Optional          | Default `90`                                                                               |
 
-If `AWS_PROFILE` or `AWS_ACCESS_KEY_ID` is set, **unset** `AWS_BEARER_TOKEN_BEDROCK`. Boto3 prefers Bearer when both are present, which breaks IAM-based proxy signing.
 
-`bedrock_config.py` clears Bearer automatically when a profile/key is detected (unless `BEDROCK_USE_BEARER=true`).
+**Do not mix SigV4 and Bearer:** unset `AWS_BEARER_TOKEN_BEDROCK` when using IAM/`AWS_PROFILE`. `bedrock_config.py` clears Bearer automatically when a profile is set.
 
 ---
 
-## Deployment patterns
+## Deploy your agent (not the proxy)
 
-### Local / staging
+Set `BEDROCK_ENDPOINT_URL` in the environment where **your** agent runs.
+
+**Local:**
 
 ```bash
 export BEDROCK_ENDPOINT_URL="https://akto-proxy?openai_url=https://bedrock-runtime.us-east-1.amazonaws.com"
-export AWS_PROFILE=my-bedrock-profile
 export AWS_REGION=us-east-1
 python -m your_agent
 ```
 
-### Docker / Kubernetes
-
-Add `BEDROCK_ENDPOINT_URL` to the container env or ConfigMap. No image rebuild required if `bedrock_config.py` is already in the codebase — toggle proxy per environment.
+**Kubernetes / Docker:**
 
 ```yaml
-# example K8s snippet
 env:
   - name: BEDROCK_ENDPOINT_URL
     value: "https://akto-proxy?openai_url=https://bedrock-runtime.us-east-1.amazonaws.com"
@@ -214,71 +210,56 @@ env:
     value: "us-east-1"
 ```
 
-Use IRSA / instance role for credentials; `AWS_PROFILE` is not needed in production if the pod/task role has Bedrock access.
+Use your existing IAM (IRSA, instance role, etc.). No proxy-side deployment on your side.
 
-### Feature flag (optional)
-
-```python
-import os
-from bedrock_config import create_bedrock_llm
-
-def build_llm():
-    return create_bedrock_llm()  # respects BEDROCK_ENDPOINT_URL when set
-```
-
-Enable proxy in staging by setting the env var; leave it unset in dev if you want direct Bedrock.
+Toggle per environment: set the var in staging/prod, leave unset in dev for direct Bedrock if you prefer.
 
 ---
 
-## Guardrails and blocked requests
+## Guardrail blocks
 
-When Akto blocks a request (PII, prompt injection, custom policy), SigV4 clients receive a **200 OK** with a normal Bedrock Converse-shaped body — the block reason appears as assistant text. Your agent should surface that text like any other model reply.
-
-No special error handling is required if you use `create_bedrock_llm()`.
+When Akto policy blocks a request (PII, prompt injection, etc.), the response looks like a **normal model reply** — the block reason appears as assistant text. Handle it like any other LLM output; no special error-code handling required if you use `create_bedrock_llm()`.
 
 ---
 
-## Checklist before go-live
+## Checklist
 
-- [ ] `bedrock_config.py` copied; `create_bedrock_llm()` used for all Bedrock LLM instances
-- [ ] `BEDROCK_ENDPOINT_URL` set to Akto-provided URL (with `openai_url`)
-- [ ] `AWS_REGION` matches the region in `openai_url`
-- [ ] `AWS_BEARER_TOKEN_BEDROCK` unset when using IAM/SigV4
-- [ ] `debug_bedrock.py` (or equivalent) succeeds in direct and proxy modes
-- [ ] Agent end-to-end test passes (tool calls, multi-turn if applicable)
-- [ ] Akto dashboard shows traffic for your agent server hostname
+- [ ] `bedrock_config.py` in your repo; `create_bedrock_llm()` used for all Bedrock clients
+- [ ] `BEDROCK_ENDPOINT_URL` set to the exact URL Akto provided
+- [ ] `AWS_REGION` matches `openai_url`
+- [ ] `AWS_BEARER_TOKEN_BEDROCK` unset when using IAM SigV4
+- [ ] End-to-end agent test passes (including tools / multi-turn if you use them)
+- [ ] If streaming: `BEDROCK_STREAM=true` and stream path tested
 
 ---
 
-## Troubleshooting
+## Troubleshooting (client-side)
 
-| Symptom | Likely cause | Fix |
-|---------|--------------|-----|
-| `InvalidSignatureException` | Signature computed for wrong Host or query | Ensure `bedrock_config` hooks are installed; `openai_url` must be stripped before sign |
-| `403` with empty message | Old gateway returning partial JSON on block | Upgrade Akto gateway; blocked SigV4 should be 200 + Converse envelope |
-| `AccessDenied` from Bedrock | IAM policy | Confirm role has `bedrock:Converse` / `bedrock:InvokeModel` for your model |
-| Requests hit AWS directly | `BEDROCK_ENDPOINT_URL` not set or not passed to client | Set env var; confirm `create_bedrock_llm()` / `endpoint_url=` is used |
-| Bearer auth instead of SigV4 | `AWS_BEARER_TOKEN_BEDROCK` set alongside profile | Unset Bearer token |
-| Wrong region | `AWS_REGION` ≠ `openai_url` region | Align region and upstream URL |
+
+| Symptom                                          | What to check                                                                                 |
+| ------------------------------------------------ | --------------------------------------------------------------------------------------------- |
+| `InvalidSignatureException`                      | `bedrock_config` hooks installed; URL includes `openai_url`; region matches                   |
+| Requests still hit AWS directly                  | `BEDROCK_ENDPOINT_URL` not set in the running process, or client built without `endpoint_url` |
+| `AccessDenied` from Bedrock                      | IAM role allows `bedrock:Converse` / `bedrock:ConverseStream` for your model                  |
+| Bearer instead of SigV4                          | Unset `AWS_BEARER_TOKEN_BEDROCK`                                                              |
+| Wrong region                                     | `AWS_REGION` must match host in `openai_url`                                                  |
+| Stream not used                                  | Set `BEDROCK_STREAM=true`; use `create_bedrock_llm()` (forces streaming with tools)           |
+| `ChecksumMismatch` or stream errors through Akto | Confirm `BEDROCK_ENDPOINT_URL` and hooks; if config is correct, contact Akto support          |
+
 
 ---
 
 ## Quick reference
 
 ```env
-# Enable Akto proxy (only change for most teams)
 BEDROCK_ENDPOINT_URL=https://akto-proxy?openai_url=https://bedrock-runtime.<region>.amazonaws.com
+AWS_REGION=<region>
+BEDROCK_STREAM=true   # optional, for ConverseStream
 ```
 
 ```python
-# Only code change for LangChain agents
 from bedrock_config import create_bedrock_llm
 llm = create_bedrock_llm()
 ```
 
-```bash
-# Smoke test
-python debug_bedrock.py
-```
-
-For internal AWS account setup (IAM roles, Bedrock access), see [AWS-BOOTSTRAP.md](AWS-BOOTSTRAP.md).
+For IAM / Bedrock account setup in your AWS account, see [AWS-BOOTSTRAP.md](AWS-BOOTSTRAP.md).

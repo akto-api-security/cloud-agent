@@ -4,11 +4,11 @@ A **LangGraph ReAct agent** backed by **Amazon Bedrock Converse** via **boto3** 
 
 ## Client integration
 
-**→ [docs/CLIENT-INTEGRATION.md](docs/CLIENT-INTEGRATION.md)** — step-by-step guide for client teams:
+**→ [docs/CLIENT-INTEGRATION.md](docs/CLIENT-INTEGRATION.md)** — client guide (URL + env config only):
 
-- Copy `bedrock_config.py`, swap `create_bedrock_llm()` in one place
-- Set `BEDROCK_ENDPOINT_URL` to enable the proxy (unset to roll back)
-- Verify with `debug_bedrock.py`
+- Paste the `BEDROCK_ENDPOINT_URL` Akto gives you
+- Copy `bedrock_config.py`, use `create_bedrock_llm()`
+- Optional: `BEDROCK_STREAM=true` for [streaming](docs/CLIENT-INTEGRATION.md#streaming-conversestream)
 
 Quick start:
 
@@ -77,8 +77,8 @@ The setup script walks through `aws configure`, optional assume-role profile, Be
 | `./scripts/setup-aws.sh sso` | `aws configure sso` (IAM Identity Center) |
 | `./scripts/setup-aws.sh role` | Add assume-role profile to `~/.aws/config` |
 | `./scripts/setup-aws.sh verify` | `sts get-caller-identity` + Bedrock Converse test |
-| `./scripts/setup-aws.sh test` | Run `debug_bedrock.py` (direct) |
-| `./scripts/setup-aws.sh test-proxy` | Run `debug_bedrock.py` via Akto proxy |
+| `./scripts/setup-aws.sh test` | Bedrock Converse smoke test (direct) |
+| `./scripts/setup-aws.sh test-proxy` | Bedrock Converse smoke test via Akto proxy |
 | `./scripts/setup-aws.sh policy` | Print IAM policy reference |
 
 ### Admin: create IAM role (one-time)
@@ -117,8 +117,8 @@ Simple curl body — SDK handles Bedrock auth headers:
 
 ```bash
 python3 agent.py              # CLI
-python3 debug_bedrock.py      # wire header capture
-uvicorn server:app --port 8000  # agent server (client + /chat APIs)
+./scripts/start-server.sh     # HTTP server (see docs/CLIENT-INTEGRATION.md)
+./scripts/test-curl.sh chat   # smoke test against running server
 ```
 
 ## Default model
@@ -134,4 +134,4 @@ uvicorn server:app --port 8000  # agent server (client + /chat APIs)
 
 ## Header encoding note
 
-If headers look "encoded" in Akto dashboard but calls return 200, that's **ingestion JSON serialization** — not boto3 mutating headers on the wire. Use `debug_bedrock.py` to inspect actual outbound headers.
+If headers look "encoded" in Akto dashboard but calls return 200, that's **ingestion JSON serialization** — not boto3 mutating headers on the wire.

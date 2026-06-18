@@ -9,13 +9,14 @@ from urllib.parse import unquote
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from agent import AgentError, clear_session, create_agent, invoke_agent
+from agent import AgentError, clear_session, create_agent, invoke_agent, stream_agent
 from bedrock_config import (
     bedrock_api,
     bedrock_auth_mode,
+    bedrock_stream_enabled,
     default_model_id,
     resolve_endpoint_url,
     resolve_proxy_signing_config,
@@ -94,6 +95,15 @@ async def agent_error_handler(_: Request, exc: AgentError):
     )
 
 
+def _http_error_from_exception(exc: Exception) -> HTTPException:
+    """Surface boto3/botocore errors (e.g. ChecksumMismatch) without masking."""
+    logger.exception("Request failed: %s", exc)
+    return HTTPException(
+        status_code=502,
+        detail=f"{type(exc).__name__}: {exc}",
+    )
+
+
 @app.get("/health")
 def health():
     proxy = resolve_proxy_signing_config()
@@ -101,6 +111,7 @@ def health():
         "status": "ok",
         "bedrock_api": bedrock_api(),
         "bedrock_auth": bedrock_auth_mode(),
+        "bedrock_stream": bedrock_stream_enabled(),
         "default_model": default_model_id(),
         "endpoint_url": resolve_endpoint_url(),
         "signing_host": resolve_signing_host(),
@@ -127,14 +138,35 @@ async def client_invoke(model_id: str, body: ClientInvokeBody, request: Request)
     except AgentError:
         raise
     except Exception as exc:
-        logger.exception("Client invoke failed requestId=%s", request_id)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise _http_error_from_exception(exc) from exc
 
     return ClientInvokeResponse(
         requestId=request_id,
         model=body.model or model_id,
         output={"message": reply},
         headers=body.headers or {"host": _bedrock_host()},
+    )
+
+
+@app.post("/chat/stream")
+def chat_stream(request: ChatRequest):
+    """Stream tokens via Bedrock ConverseStream (requires BEDROCK_STREAM=true)."""
+    if not bedrock_stream_enabled():
+        raise HTTPException(
+            status_code=400,
+            detail="Streaming disabled. Set BEDROCK_STREAM=true.",
+        )
+
+    thread_id = request.thread_id or str(uuid.uuid4())
+
+    def token_generator():
+        for token in stream_agent(_get_agent(), request.message, thread_id):
+            yield token
+
+    return StreamingResponse(
+        token_generator(),
+        media_type="text/plain; charset=utf-8",
+        headers={"X-Thread-Id": thread_id},
     )
 
 
@@ -146,8 +178,7 @@ def chat(request: ChatRequest):
     except AgentError:
         raise
     except Exception as exc:
-        logger.exception("Chat error thread=%s", thread_id)
-        raise HTTPException(status_code=500, detail="Unexpected server error") from exc
+        raise _http_error_from_exception(exc) from exc
     return ChatResponse(reply=reply, thread_id=thread_id)
 
 

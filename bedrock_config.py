@@ -79,6 +79,10 @@ def bedrock_auth_mode() -> Literal["sigv4", "bearer"]:
     return "sigv4"
 
 
+def bedrock_stream_enabled() -> bool:
+    return os.getenv("BEDROCK_STREAM", "").strip().lower() in ("1", "true", "yes")
+
+
 def _default_signing_host() -> str:
     region = os.getenv("AWS_REGION", DEFAULT_REGION)
     return f"bedrock-runtime.{region}.amazonaws.com"
@@ -261,9 +265,10 @@ def create_bedrock_llm(model_id: str | None = None):
     proxy_config = resolve_proxy_signing_config()
 
     logger.info(
-        "Bedrock api=%s auth=%s model=%s region=%s endpoint_url=%s signing_host=%s",
+        "Bedrock api=%s auth=%s stream=%s model=%s region=%s endpoint_url=%s signing_host=%s",
         api,
         bedrock_auth_mode(),
+        bedrock_stream_enabled(),
         kwargs["model_id"],
         kwargs["region_name"],
         kwargs.get("endpoint_url") or "(default AWS)",
@@ -271,9 +276,45 @@ def create_bedrock_llm(model_id: str | None = None):
     )
 
     if api == "converse":
+        if bedrock_stream_enabled():
+            # Nova defaults to disable_streaming="tool_calling"; force ConverseStream
+            # so boto3 validates event-stream CRC32 (standard Bedrock streaming path).
+            kwargs["disable_streaming"] = False
         llm = ChatBedrockConverse(**kwargs)
     else:
         llm = ChatBedrock(**kwargs)
 
     _apply_proxy_signing(llm)
     return llm
+
+
+def create_bedrock_runtime_client():
+    """boto3 bedrock-runtime client with proxy signing hooks (for ConverseStream tests)."""
+    import boto3
+
+    region = os.getenv("AWS_REGION", DEFAULT_REGION)
+    endpoint_url = resolve_endpoint_url()
+    profile = os.getenv("AWS_PROFILE", "").strip()
+
+    session_kwargs: dict[str, Any] = {"region_name": region}
+    if profile:
+        session_kwargs["profile_name"] = profile
+
+    client_kwargs: dict[str, Any] = {
+        "config": Config(
+            connect_timeout=_llm_timeout_seconds(),
+            read_timeout=_llm_timeout_seconds(),
+            retries={"max_attempts": 0},
+        ),
+    }
+    if endpoint_url:
+        client_kwargs["endpoint_url"] = endpoint_url
+
+    session = boto3.Session(**session_kwargs)
+    client = session.client("bedrock-runtime", **client_kwargs)
+
+    proxy_config = resolve_proxy_signing_config()
+    if proxy_config and bedrock_auth_mode() == "sigv4":
+        install_proxy_sigv4_signing(client, proxy_config)
+
+    return client

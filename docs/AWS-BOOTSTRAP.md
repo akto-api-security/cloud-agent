@@ -71,9 +71,9 @@ Access is controlled via IAM. If Converse fails with `AccessDenied`:
 
 ```bash
 export AWS_PROFILE=cloud-agent-bedrock
-python3 debug_bedrock.py    # SigV4 wire headers
-python3 agent.py              # full agent
-./scripts/setup-aws.sh test-proxy   # via Akto proxy
+./scripts/setup-aws.sh test           # Bedrock Converse smoke test
+python3 agent.py                      # full agent CLI
+./scripts/setup-aws.sh test-proxy     # via Akto proxy (set BEDROCK_ENDPOINT_URL)
 ```
 
 ## Manual fallback (if script fails)

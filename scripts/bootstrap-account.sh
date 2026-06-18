@@ -374,14 +374,26 @@ step_test_agent() {
     return
   fi
 
-  log "Test cloud-agent (debug_bedrock.py)"
+  log "Test cloud-agent (boto3 Converse smoke test)"
   cd "$ROOT"
   # shellcheck disable=SC1091
   source .venv/bin/activate
   export AWS_PROFILE="$PROFILE_BEDROCK"
   export AWS_REGION="$REGION"
   unset AWS_BEARER_TOKEN_BEDROCK BEDROCK_ENDPOINT_URL || true
-  "$ROOT/.venv/bin/python" debug_bedrock.py
+  "$ROOT/.venv/bin/python" - <<'PY'
+from bedrock_config import create_bedrock_runtime_client, default_model_id
+import os
+
+client = create_bedrock_runtime_client()
+model_id = os.getenv("BEDROCK_MODEL_ID", "").strip() or default_model_id()
+response = client.converse(
+    modelId=model_id,
+    messages=[{"role": "user", "content": [{"text": "Reply with exactly: ok"}]}],
+    inferenceConfig={"maxTokens": 16, "temperature": 0},
+)
+print("SUCCESS:", response["output"]["message"]["content"][0]["text"])
+PY
 }
 
 print_summary() {
@@ -405,8 +417,8 @@ AWS CLI profiles:
 Next:
   source .venv/bin/activate
   python3 agent.py
-  python3 debug_bedrock.py
-  ./scripts/setup-aws.sh test-proxy       # test Akto proxy
+  ./scripts/test-curl.sh chat
+  ./scripts/setup-aws.sh test-proxy       # test Akto proxy (set BEDROCK_ENDPOINT_URL first)
 
 ========================================
 EOF
